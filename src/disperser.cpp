@@ -8,6 +8,7 @@
 #include <glm/mat4x4.hpp> // glm::mat4
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <glm/gtx/euler_angles.hpp>
 
 #include <stdio.h>
 
@@ -351,13 +352,13 @@ private:
 int main()
 {
     try {
-        af::setDevice(1);
+        af::setDevice(2);
 
         af::info();
 
-        const int width = 256;
-        const int height = width;
-        const int num = width*height;
+        const int imageWidth = 16;
+        const int imageHeight = imageWidth;
+        const int num = imageWidth*imageHeight;
 
         int stepNum = 0;
 
@@ -366,7 +367,7 @@ int main()
         array vid;
         array gpos, gindex;
 
-        const int gpower = 4;
+        const int gpower = 5;
         const int grid = 1 << gpower;
         const int gmask = grid - 1;
 
@@ -377,7 +378,7 @@ int main()
         std::vector<double> h_dir;
 
         const float center = grid * 0.5;
-        const float radius = grid/2 - 1;
+        const float radius = grid/3 - 1;
         for (size_t iz = 0; iz < grid; iz++) {
             for (size_t iy = 0; iy < grid; iy++) {
                 for (size_t ix = 0; ix < grid; ix++) {
@@ -405,10 +406,10 @@ int main()
         glm::tvec3<double> camPos;
         camPos.x = 0;
         camPos.y = 0;
-        camPos.z = 0;
+        camPos.z = 1;
 
         glm::tvec3<double> camRot;
-        camRot.x = 0;
+        camRot.x = glm::radians(90.);
         camRot.y = 0;
         camRot.z = 0;
 
@@ -417,6 +418,7 @@ int main()
 
         //frustum.update(glm::value_ptr(glm::f64mat4(cam)));
 
+        double t = 0;
 
         af::Window window(512, 512, "Test!");
         while (!window.close()) {
@@ -426,11 +428,11 @@ int main()
                 if (stepNum == 0) {
 
 
-                    //glm::f64mat4 projection = glm::ortho(0.0, (double)width, (double)height, 0.0, 0.1, 1000.0);
-                    //glm::f64mat4 projection = glm::orthoLH(0.0, (double)width, (double)height, 0.0, 0.1, 1000.0);
-                    //glm::f64mat4 projection = glm::perspectiveFovLH(60. / 180 * glm::pi<double>(), (double)width, (double)height, 0.2, 1000.0);
+                    //glm::f64mat4 projection = glm::ortho(0.0, (double)imageWidth, (double)imageHeight, 0.0, 0.1, 1000.0);
+                    //glm::f64mat4 projection = glm::orthoLH(0.0, (double)imageWidth, (double)imageHeight, 0.0, 0.1, 1000.0);
+                    //glm::f64mat4 projection = glm::perspectiveFovLH(60. / 180 * glm::pi<double>(), (double)imageWidth, (double)imageHeight, 0.2, 1000.0);
                     /*
-                    glm::f64mat4 projection = glm::perspective(60.,  (double)width / (double)height, 0.1, 1000.0);
+                    glm::f64mat4 projection = glm::perspective(60.,  (double)imageWidth / (double)imageHeight, 0.1, 1000.0);
                     glm::f64mat4 view{};
                     view = glm::translate(view, camPos);
                     view = glm::rotate(view, camRot.x, glm::f64vec3(0., 0., 1.));
@@ -442,45 +444,75 @@ int main()
                     frustum.fromInvMatrix(invcam);
                     */
 
-                    glm::f64vec4 p;
+                    double fov = 70;
+                    double imageAspect = (double)imageWidth / imageHeight;
+                    double fovTan = tan(glm::radians(fov)/2);
                     
-                    p = glm::f64vec4(0, 0, 1, 1);
+                    glm::f64mat4 view{};
+                    view = glm::lookAt(glm::f64vec3(0, 0, 0), glm::f64vec3(0, 1, 0.5), glm::f64vec3(0, 0, -1));
 
-                    //glm::f64vec4 res = projection * p;
-                    //res /= res.w;
+                    //view = glm::rotate(view, camRot.z, glm::f64vec3(0., 0., 1.));
+                    //view = glm::rotate(view, camRot.y, glm::f64vec3(0., 1., 0.));
+                    //view = glm::rotate(view, camRot.x, glm::f64vec3(1., 0., 0.));
+                    //view = glm::eulerAngleXY(camRot.y, camRot.x);
+                    //view = glm::translate(view, camPos);
 
+                    //glm::f64vec4 origin = view * glm::f64vec4(0, 0, 0, 1);
+                    //glm::f64vec4 direction = view * glm::f64vec4(px, py, -1, 0);
+                    //direction = glm::normalize(direction);
+                    
 
+                    //glm::f64vec3 origin{ 0, 0, 0 };
+                    //glm::f64vec3 direction = glm::f64vec3(px, py, -1) - origin;
+                    //direction = glm::normalize(direction);
 
-                    printf("%f %f %f %f\n", res.x, res.y, res.z, res.w);
+                    //printf("ori %f %f %f %f\n", origin.x, origin.y, origin.z, origin.w);
+                    //printf("dir %f %f %f %f\n", direction.x, direction.y, direction.z, direction.w);
 
-                    h_pos.resize(width*height * 3);
-                    h_dir.resize(width*height * 3);
+                    //getc(stdin);
+                    //exit(1);
 
-                    for (size_t iy = 0; iy < height; iy++) {
-                        for (size_t ix = 0; ix < width; ix++) {
+                    h_pos.resize(imageWidth*imageHeight * 3);
+                    h_dir.resize(imageWidth*imageHeight * 3);
 
-                            size_t index = ix + iy*width;
+                    for (size_t iy = 0; iy < imageHeight; iy++) {
+                        for (size_t ix = 0; ix < imageWidth; ix++) {
 
-                            double fx = (ix + 0.5)/width;
-                            double fy = (iy + 0.5)/height;
+                            size_t index = ix + iy*imageWidth;
+
+                            /*
+                            double fx = (ix + 0.5)/imageWidth;
+                            double fy = (iy + 0.5)/imageHeight;
                             glm::f64vec4 pn = frustum.nearRect.pointOnSurface(fx, fy);
                             glm::f64vec4 pf = frustum.farRect.pointOnSurface(fx, fy);
-                        
+                            
                             glm::f64vec4 dir = pf - pn;
                             dir = dir / glm::length(dir);
+                            */
 
-                            h_pos[index + 0 * num] = pn.x;
-                            h_pos[index + 1 * num] = pn.y;
-                            h_pos[index + 2 * num] = pn.z;
+                            double px = (2 * (ix + 0.5) / imageWidth - 1) * fovTan * imageAspect;
+                            double py = (1 - 2 * (iy + 0.5) / imageHeight) * fovTan;
+                            glm::f64vec4 dir = glm::normalize(view * glm::f64vec4(px, py, -1, 0));
+
+                            h_pos[index + 0 * num] = camPos.x;
+                            h_pos[index + 1 * num] = camPos.y;
+                            h_pos[index + 2 * num] = camPos.z;
                             h_dir[index + 0 * num] = dir.x;
                             h_dir[index + 1 * num] = dir.y;
                             h_dir[index + 2 * num] = dir.z;
                         }
                     }
 
+                    h_pos[0 + 0 * num] = h_pos[0 + 1 * num] = h_pos[0 + 2 * num] = -10;
+                    h_pos[1 + 0 * num] = h_pos[1 + 1 * num] = h_pos[1 + 2 * num] = 10;
+                    
+                    h_dir[0 + 0 * num] = h_dir[0 + 1 * num] = h_dir[0 + 2 * num] = -1;
+                    h_dir[1 + 0 * num] = h_dir[1 + 1 * num] = h_dir[1 + 2 * num] = 1;
 
                     pos = array(num, 3, &h_pos[0]);
                     dir = array(num, 3, &h_dir[0]);
+
+                    //window.image(af::reorder(moddims(dir.as(f32), imageWidth, imageHeight), 1, 0));
 
                     vid = constant(0, num, 1);
 
@@ -490,8 +522,8 @@ int main()
                     stepOnce(vpos, step, tdelta, tmax, vid);
                 }
 
-                gpos = af::min(af::max(vpos, 0.), (double)gmask);
-                //gpos = vpos & gmask;
+                //gpos = af::min(af::max(vpos, 0.), (double)gmask-1);
+                gpos = vpos & gmask;
             
                 gindex = array(num, 1);
                 gindex = gpos.col(0) + gpos.col(1)*grid + gpos.col(2)*grid*grid;
@@ -501,16 +533,32 @@ int main()
             }
 
 
-            window.image(af::reorder(moddims(vid.as(f32), width, height), 1, 0));
+            //window.image(af::reorder(moddims(vid.as(f32), imageWidth, imageHeight), 1, 0));
 
-            //stepNum++; if (stepNum > 100) stepNum = 0;
-        
+            window.scatter3(dir.as(f32));
+            
             window.show();
 
-            getc(stdin);
-            //Sleep(20);
+            //stepNum++; if (stepNum > 100) stepNum = 0;
 
-            camRot.x += 0.1;
+            //getc(stdin);
+            Sleep(20);
+
+            //camPos.x = sin(t*0.04) * 10;
+
+            //printf("%f \n", camPos.x);
+
+            double a = t*0.1;
+            double r = 5;
+
+            //camPos.x = cos(a) * r;
+            //camPos.y = sin(a) * r;
+
+            //camRot.x += 0.2;
+            //camRot.y += 0.2;
+            //camRot.z += 0.001;
+
+            t++;
 
         }
 
