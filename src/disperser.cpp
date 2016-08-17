@@ -8,114 +8,131 @@
 #include <glm/mat4x4.hpp> // glm::mat4
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
-#include <glm/gtx/euler_angles.hpp>
+#include <glm/gtx/quaternion.hpp>
 
 #include <stdio.h>
+#include <cstdint>
 
 #include <vector>
+
+#include <mutex>
 
 #undef far
 #undef near
 
+enum CoordSide {
+    X,
+    Y,
+    Z
+};
+
+
+#if __cplusplus < 201103L && (!defined(_MSC_VER) || _MSC_VER < 1700)
+#error Timer requires C++11
+#elif 1
+#include <chrono>
+class Timer {
+    typedef std::chrono::high_resolution_clock clock;
+    typedef std::chrono::nanoseconds ns;
+
+    std::mutex mutex;
+
+    clock::time_point start;
+    long long counted;
+
+    const char *name;
+    bool printed;
+
+public:
+    Timer(const char *name)
+    {
+        this->name = name;
+        tick();
+    }
+    ~Timer()
+    {
+        print();
+    }
+
+    void tick()
+    {
+        printed = false;
+        counted = 0;
+        start = clock::now();
+    }
+    ns tock() const
+    {
+        return std::chrono::duration_cast<ns>(clock::now() - start);
+    }
+    long long print()
+    {
+        long long c = tock().count();
+        printed = true;
+        const char *unit;
+        if (c < 1000) {
+            unit = "ns";
+        }
+        else if (c < 1000000l) {
+            c /= 1000l;
+            unit = "us";
+        }
+        else {
+            c /= 1000000l;
+            unit = "ms";
+        }
+        printf("%s %*s%lld%s\n", name, (int)(20 - strlen(name)), " ", c, unit);
+        return c;
+    }
+};
+#endif
+
+#if 1
+#define dtimer(name) Timer timer(name)
+#define dtimerInit(var_id, name) Timer timer_ ## var_id {name}
+#define dtimerStart(var_id) timer_ ## var_id .tick()
+#define dtimerStop(var_id) timer_ ## var_id .count()
+#else
+#define dtimer(name)
+#define dtimerInit(name)
+#define dtimerStart(name)
+#define dtimerStop(name)
+#endif
+
 using namespace af;
 
-void initStep(const array &pos, const array &dir, array &vpos, array &step, array &tdelta, array &tmax)
+static int frame = 0;
+
+
+
+static int getBlockIndexXYZ(const int bx, const int by, const int bz, const int grid)
 {
-    // x = px < 0 ? int(px) - 1 : int(px);
-    // y = py < 0 ? int(py) - 1 : int(py);
-    // z = pz < 0 ? int(pz) - 1 : int(pz);
-
-    vpos = floor(pos).as(s32);
-
-    array invdir = 1.0 / dir;
-
-    step = (1 - sign(dir) * 2).as(b8);
-    tdelta = abs(invdir);
-
-    tmax = (vpos + (dir >= 0) - pos) * invdir;
-
-
-    // tMaxX = r.i >= 0 ? (x + 1 - px)*r.ii : (x - px)*r.ii;
-    // tMaxY = r.j >= 0 ? (y + 1 - py)*r.ij : (y - py)*r.ij;
-    // tMaxZ = r.k >= 0 ? (z + 1 - pz)*r.ik : (z - pz)*r.ik;
-
-    /*
-    if (tMaxX < tMaxY) {
-        if (tMaxX < tMaxZ) {
-            side = 2;
-        }
-        else {
-            side = 1;
-        }
-    }
-    else {
-        if (tMaxY < tMaxZ) {
-            side = 0;
-        }
-        else {
-            side = 1;
-        }
-    }
-    */
+    return bx + by*grid + bz*grid*grid;
 }
 
-void stepOnce(array &vpos, const array &step, const array &tdelta, array &tmax, const array &vid)
+static array getBlockIndexXYZ(const array pos, const int grid)
 {
-    array xly = tmax.col(0) < tmax.col(1);
-    array xlz = tmax.col(0) < tmax.col(2);
-    array ylz = tmax.col(1) < tmax.col(2);
-
-    // Rays are moving if they did not hit anything (for now)
-    array moving = vid == 0;
-
-    // Step dimension conditionals
-    array cond = join(1,
-        (xly && xlz),
-        (!xly && ylz),
-        ((xly && !xlz) || (!xly && !ylz))
-    );
-
-    // Only step moving rays
-    cond *= join(1, moving, moving, moving);
-
-    vpos += step * cond;
-    tmax += tdelta * cond;
-
-    /*
-    public function step() :void {
-        if (tMaxX < tMaxY) {
-            if (tMaxX < tMaxZ) {
-                x += stepX;
-                tMaxX += tDeltaX;
-                side = 2;
-            }
-            else {
-                z += stepZ;
-                tMaxZ += tDeltaZ;
-                side = 1;
-            }
-        }
-        else {
-            if (tMaxY < tMaxZ) {
-                y += stepY;
-                tMaxY += tDeltaY;
-                side = 0;
-            }
-            else {
-                z += stepZ;
-                tMaxZ += tDeltaZ;
-                side = 1;
-            }
-        }
-        steps++;
-    }
-    */
-
+    return pos.col(0) + pos.col(1)*grid + pos.col(2)*grid*grid;
 }
 
-static inline int getBlockIndex(const int bx, const int by, const int bz, const int sx, const int sxy)
+template<class T>
+static T mortonSplitBy3(T x)
 {
-    return bx + by*sx + bz*sxy;
+    x = x & 0x000003ff;
+    x = (x | x << 16) & 0x30000ff;
+    x = (x | x << 8)  & 0x0300f00f;
+    x = (x | x << 4)  & 0x30c30c3;
+    x = (x | x << 2) & 0x9249249;
+    return x;
+}
+
+static uint32_t getBlockIndexMorton(const int bx, const int by, const int bz, const int grid)
+{
+    return mortonSplitBy3(bx) | (mortonSplitBy3(by) << 1) | (mortonSplitBy3(bz) << 2);
+}
+
+static array getBlockIndexMorton(const array pos, const int grid)
+{
+    return mortonSplitBy3(pos.col(0)) + (mortonSplitBy3(pos.col(1)) << 1) | (mortonSplitBy3(pos.col(2)) << 2);
 }
 
 static inline void getIndexBlock(const int index, int sx, int sy, int &bx, int &by, int &bz)
@@ -349,33 +366,307 @@ private:
 
 };
 
+#define vassert(x, format, ...) if (!(x)) { printf(format, __VA_ARGS__); __debugbreak(); }
+
+static void writeCoords(const float x, const float y, const float z, FILE* file)
+{
+    fwrite(&x, sizeof(float), 1, file);
+    fwrite(&y, sizeof(float), 1, file);
+    fwrite(&z, sizeof(float), 1, file);
+}
+
+static void writeVector(const std::vector<double>& vec, FILE* file)
+{
+    fwrite(&vec[0], sizeof(double), vec.size(), file);
+    /*
+    for (auto num : vec) {
+    fwrite(&num, sizeof(double), 1, file);
+    }
+    //*/
+}
+
+template <class T>
+static void writeVector(const std::vector<T>& vec, FILE* file)
+{
+    for (auto num : vec) {
+        double n = (double)num;
+        fwrite(&n, sizeof(double), 1, file);
+    }
+}
+
+struct VoxelTrace
+{
+    // Set on init
+    array step, tdelta;
+
+    // Stepped
+    array vpos, tmax, side;
+
+    // Looked up value IDs
+    array vid;
+    array indices;
+
+    array getOrJoin(const array lhs, const array rhs) const
+    {
+        return lhs.elements() > 0 ? rhs.elements() > 0 ? af::join(0, lhs, rhs) : lhs : rhs;
+    }
+
+    VoxelTrace& operator+=(const VoxelTrace &rhs)
+    {
+        step = getOrJoin(step, rhs.step);
+        tdelta = getOrJoin(tdelta, rhs.tdelta);
+        vpos = getOrJoin(vpos, rhs.vpos);
+        tmax = getOrJoin(tmax, rhs.tmax);
+        side = getOrJoin(side, rhs.side);
+        vid = getOrJoin(vid, rhs.vid);
+        indices = getOrJoin(indices, rhs.indices);
+        return *this;
+    }
+
+    void filterFrom(const VoxelTrace &src, const array &idx)
+    {
+        step = af::lookup(src.step, idx, 0);
+        tdelta = af::lookup(src.tdelta, idx, 0);
+        vpos = af::lookup(src.vpos, idx, 0);
+        tmax = af::lookup(src.tmax, idx, 0);
+        side = af::lookup(src.side, idx, 0);
+        indices = af::lookup(src.indices, idx, 0);
+    }
+
+    void reset()
+    {
+        step = array();
+        tdelta = array();
+        vpos = array();
+        tmax = array();
+        side = array();
+        indices = array();
+    }
+
+    void initStep(const array &pos, const array &dir)
+    {
+        vpos = floor(pos).as(s32);
+
+        array invdir = 1.0 / dir;
+
+        step = (sign(dir) * 2).as(u8);
+        tdelta = abs(invdir);
+
+        tmax = (vpos + 1 - sign(dir) - pos)*invdir;
+
+        array xly = tmax.col(0) < tmax.col(1);
+        array xlz = tmax.col(0) < tmax.col(2);
+        array ylz = tmax.col(1) < tmax.col(2);
+
+        side = (((xly & !xlz).as(u8) << 1) | (!xly)*(2 - ylz)).as(u8);
+
+        indices = af::iota(dim4(vpos.dims()[0]));
+    }
+
+
+    void stepOnce()
+    {
+        if (vpos.elements() <= 0) return;
+
+        array xly = tmax.col(0) < tmax.col(1);
+        array xlz = tmax.col(0) < tmax.col(2);
+        array ylz = tmax.col(1) < tmax.col(2);
+
+        // Rays are moving if they did not hit anything (for now)
+        array moving = vid == 0;
+
+        // Step dimension conditionals
+        array cond = join(1,
+            (xly && xlz),
+            (!xly && ylz),
+            ((xly && !xlz) || (!xly && !ylz))
+        );
+
+        // Only step moving rays
+        cond *= join(1, moving, moving, moving);
+
+        vpos += (1 - step) * cond;
+        tmax += tdelta * cond;
+        side = !moving * side + moving*((((xly & !xlz) << 1) | (!xly)*(2 - ylz)).as(u8));
+    }
+
+    void lookup(const int grid, const array& ids)
+    {
+        if (vpos.elements() <= 0) {
+            vid = array();
+            return;
+        }
+        const int gmask = grid - 1;
+        array gindex = getBlockIndexXYZ(vpos & gmask, grid);
+        //gindex = getBlockIndexMorton(gpos, grid);
+        vid = af::lookup(ids, gindex, 0);
+    }
+
+    void sortResults(VoxelTrace &hits)
+    {
+        if (vid.elements() <= 0) return;
+
+        array sorted_vid;
+        array sorted_vid_index;
+
+        af::sort(sorted_vid, sorted_vid_index, vid, 0, true);
+
+        sorted_vid_index = sorted_vid_index.copy();
+
+        int nonzero = af::count<int>(sorted_vid);
+
+        if (nonzero == 0) return;
+
+        int rownum = sorted_vid.dims()[0];
+
+        // Copy is required before using lookup!
+        array hits_indices = sorted_vid_index.rows(rownum - nonzero, rownum - 1).copy();
+        hits.vid = sorted_vid.rows(rownum - nonzero, rownum - 1);
+        hits.filterFrom(*this, hits_indices);
+
+        if (rownum <= nonzero) {
+            reset();
+        } else {
+            array new_indices = sorted_vid_index.rows(0, rownum - 1 - nonzero).copy();
+            vid = sorted_vid.rows(0, rownum - 1 - nonzero);
+            filterFrom(*this, new_indices);
+        }
+
+    }
+};
+
+struct Rays
+{
+    array screen;
+    array pos, dir;
+    array t;
+};
+
+struct RayBatch
+{
+    Rays r;
+    VoxelTrace v;
+    VoxelTrace hits;
+
+    void initStep()
+    {
+        v.initStep(r.pos, r.dir);
+    }
+
+    void stepToTime()
+    {
+        if (hits.indices.elements() <= 0) {
+            r.t = array();
+            return;
+        }
+
+        array lpos = af::lookup(r.pos, hits.indices, 0);
+        array ldir = af::lookup(r.dir, hits.indices, 0);
+
+        array t3 = (hits.vpos - lpos + (ldir < 0)) / ldir;
+        r.t = select(hits.side == 1, t3.col(1), t3.col(0));
+        r.t = select(hits.side == 2, t3.col(2), r.t);
+
+
+        //r.t = v.stepToTime(r.pos, r.dir);
+        /*
+        if (vpos.elements() <= 0) return array();
+        vassert(vpos.elements() == pos.elements(), "Mismatched voxel trace and ray sizes");
+        array t3 = (vpos - pos + (dir < 0)) / dir;
+        array t;
+        t = select(side == 1, t3.col(1), t3.col(0));
+        t = select(side == 2, t3.col(2), t);
+        return t;
+        */
+    }
+};
+
 int main()
 {
     try {
-        af::setDevice(2);
+        af::setDevice(0);
 
         af::info();
 
-        const int imageWidth = 16;
+        const int imageWidth = 4;
         const int imageHeight = imageWidth;
         const int num = imageWidth*imageHeight;
 
+        const char* debugPath = "points.bin";
+        FILE* debug = fopen(debugPath, "wb");
+        vassert(debug, "Unable to open %s", debugPath);
+        
         int stepNum = 0;
 
-        array x, y, z, pos, dir;
-        array vpos, step, tdelta, tmax;
-        array vid;
-        array gpos, gindex;
+        RayBatch b;
 
-        const int gpower = 5;
+        
+        /*
+            if (tMaxX < tMaxY) {
+                if (tMaxX < tMaxZ) {
+                    side = 2; // 0
+                }
+                else {
+                    side = 1; // 2
+                }
+            }
+            else {
+                if (tMaxY < tMaxZ) {
+                    side = 0; // 1
+                }
+                else {
+                    side = 1; // 2
+                }
+            }
+        */
+
+        /*
+        double h_tmax[] = {
+            1, 2, 3,
+            1, 3, 2,
+            2, 3, 1,
+
+            2, 1, 3,
+            3, 1, 2,
+            3, 2, 1
+        };
+
+        array tmax(3, 6, h_tmax);
+        tmax = af::transpose(tmax);
+        af_print(tmax);
+
+        array xly = tmax.col(0) < tmax.col(1);
+        array xlz = tmax.col(0) < tmax.col(2);
+        array ylz = tmax.col(1) < tmax.col(2);
+
+        af_print(xly);
+        af_print(xlz);
+        af_print(ylz);
+
+        array side = (((xly & !xlz).as(u8) << 1) | (!xly)*(2 - ylz)).as(u8);
+
+        af_print(side);
+
+        exit(0);
+        */
+
+
+
+        const int gpower = 3;
         const int grid = 1 << gpower;
         const int gmask = grid - 1;
 
         std::vector<int> h_ids;
         h_ids.resize(grid*grid*grid);
 
+        std::vector<int> h_screen;
         std::vector<double> h_pos;
         std::vector<double> h_dir;
+        std::vector<int> h_vpos;
+        std::vector<byte> h_step;
+
+        std::vector<float> h_image;
+        std::vector<float> h_colors;
 
         const float center = grid * 0.5;
         const float radius = grid/3 - 1;
@@ -388,7 +679,9 @@ int main()
                     float dx = fx - center;
                     float dy = fy - center;
                     float dz = fz - center;
-                    h_ids[getBlockIndex(ix, iy, iz, grid, grid*grid)] = dx*dx + dy*dy + dz*dz < radius*radius ? 1 : 0;
+                    uint32_t index = getBlockIndexXYZ(ix, iy, iz, grid);
+                    //uint32_t index = getBlockIndexMorton(ix, iy, iz, grid);
+                    h_ids[index] = dx*dx + dy*dy + dz*dz < radius*radius ? 1 : 0;
                     //h_ids[getBlockIndex(ix, iy, iz, grid, grid*grid)] = getBlockIndex(ix, iy, iz, grid, grid*grid);
                     //h_ids[getBlockIndex(ix, iy, iz, grid, grid*grid)] = grid*grid*grid - 1 - getBlockIndex(ix, iy, iz, grid, grid*grid);
                     //h_ids[getBlockIndex(ix, iy, iz, grid, grid*grid)] = 1;
@@ -403,164 +696,327 @@ int main()
 
         //getc(stdin); return 0;
 
-        glm::tvec3<double> camPos;
-        camPos.x = 0;
-        camPos.y = 0;
-        camPos.z = 1;
+        glm::f64vec3 camPos{ 0, 0, 0 };
+        glm::f64vec3 camDir{ 0, 0, -1 };
 
         glm::tvec3<double> camRot;
         camRot.x = glm::radians(90.);
-        camRot.y = 0;
-        camRot.z = 0;
+        camRot.y = glm::radians(0.);
+        camRot.z = glm::radians(0.);
 
         glm::mat4 cam;
         Frustum<double> frustum;
 
+        std::vector<long long> stepTimes;
+
         //frustum.update(glm::value_ptr(glm::f64mat4(cam)));
 
-        double t = 0;
+        double fov = 60;
 
-        af::Window window(512, 512, "Test!");
+        glm::f64mat4 view{};
+
+        //double t = 0;
+
+        af::Window window(512, 512, "disperser");
         while (!window.close()) {
+        //while (frame < 25) {
 
-            for (stepNum = 0; stepNum < 50; stepNum++) {
+            printf("frame %d\n", frame);
 
-                if (stepNum == 0) {
+            //rewind(debug);
+
+            {
+                Timer timer("stepping");
+
+                for (stepNum = 0; stepNum < 500; stepNum++) {
+
+                    if (stepNum == 0) {
+
+                        //dtimer("initStep");
+
+                        //glm::f64mat4 projection = glm::ortho(0.0, (double)imageWidth, (double)imageHeight, 0.0, 0.1, 1000.0);
+                        //glm::f64mat4 projection = glm::orthoLH(0.0, (double)imageWidth, (double)imageHeight, 0.0, 0.1, 1000.0);
+                        //glm::f64mat4 projection = glm::perspectiveFovLH(60. / 180 * glm::pi<double>(), (double)imageWidth, (double)imageHeight, 0.2, 1000.0);
+                        /*
+                        glm::f64mat4 projection = glm::perspective(60.,  (double)imageWidth / (double)imageHeight, 0.1, 1000.0);
+                        glm::f64mat4 view{};
+                        view = glm::translate(view, camPos);
+                        view = glm::rotate(view, camRot.x, glm::f64vec3(0., 0., 1.));
+                        view = glm::rotate(view, camRot.y, glm::f64vec3(1., 0., 0.));
+                        view = glm::rotate(view, camRot.z, glm::f64vec3(0., 1., 0.));
+                        cam = projection * view;
+                        glm::mat4 invcam = glm::inverse(cam);
+
+                        frustum.fromInvMatrix(invcam);
+                        */
+
+                        double imageAspect = (double)imageWidth / imageHeight;
+                        double fovTan = tan(glm::radians(fov) / 2);
+
+                        //view = glm::lookAt(camPos, camPos + camDir, glm::f64vec3(0, 0, 1));
+
+                        glm::quat qrot = glm::quat(camRot);
+
+                        glm::f64mat4 view{};
+                        view = glm::toMat4(qrot);
+                        //view = glm::translate(view, camPos);
 
 
-                    //glm::f64mat4 projection = glm::ortho(0.0, (double)imageWidth, (double)imageHeight, 0.0, 0.1, 1000.0);
-                    //glm::f64mat4 projection = glm::orthoLH(0.0, (double)imageWidth, (double)imageHeight, 0.0, 0.1, 1000.0);
-                    //glm::f64mat4 projection = glm::perspectiveFovLH(60. / 180 * glm::pi<double>(), (double)imageWidth, (double)imageHeight, 0.2, 1000.0);
-                    /*
-                    glm::f64mat4 projection = glm::perspective(60.,  (double)imageWidth / (double)imageHeight, 0.1, 1000.0);
-                    glm::f64mat4 view{};
-                    view = glm::translate(view, camPos);
-                    view = glm::rotate(view, camRot.x, glm::f64vec3(0., 0., 1.));
-                    view = glm::rotate(view, camRot.y, glm::f64vec3(1., 0., 0.));
-                    view = glm::rotate(view, camRot.z, glm::f64vec3(0., 1., 0.));
-                    cam = projection * view;
-                    glm::mat4 invcam = glm::inverse(cam);
+                        /*
+                        printf("0: %f %f %f \n", view[0][0], view[1][0], view[2][0]);
+                        printf("1: %f %f %f \n", view[0][1], view[1][1], view[2][1]);
+                        printf("2: %f %f %f \n", view[0][2], view[1][2], view[2][2]);
+                        printf("3: %f %f %f \n", view[0][3], view[1][3], view[2][3]);
 
-                    frustum.fromInvMatrix(invcam);
-                    */
+                        //getc(stdin);
 
-                    double fov = 70;
-                    double imageAspect = (double)imageWidth / imageHeight;
-                    double fovTan = tan(glm::radians(fov)/2);
-                    
-                    glm::f64mat4 view{};
-                    view = glm::lookAt(glm::f64vec3(0, 0, 0), glm::f64vec3(0, 1, 0.5), glm::f64vec3(0, 0, -1));
+                        glm::f64vec4 p{ 0, 1, 0, 0 };
 
-                    //view = glm::rotate(view, camRot.z, glm::f64vec3(0., 0., 1.));
-                    //view = glm::rotate(view, camRot.y, glm::f64vec3(0., 1., 0.));
-                    //view = glm::rotate(view, camRot.x, glm::f64vec3(1., 0., 0.));
-                    //view = glm::eulerAngleXY(camRot.y, camRot.x);
-                    //view = glm::translate(view, camPos);
+                        p = view * p;
 
-                    //glm::f64vec4 origin = view * glm::f64vec4(0, 0, 0, 1);
-                    //glm::f64vec4 direction = view * glm::f64vec4(px, py, -1, 0);
-                    //direction = glm::normalize(direction);
-                    
+                        printf("%f %f %f %f \n", p.x, p.y, p.z, p.w);
 
-                    //glm::f64vec3 origin{ 0, 0, 0 };
-                    //glm::f64vec3 direction = glm::f64vec3(px, py, -1) - origin;
-                    //direction = glm::normalize(direction);
 
-                    //printf("ori %f %f %f %f\n", origin.x, origin.y, origin.z, origin.w);
-                    //printf("dir %f %f %f %f\n", direction.x, direction.y, direction.z, direction.w);
+                        view = glm::inverse(view);
+                        */
+                        //view = glm::rotate(view, camRot.z, glm::f64vec3(0., 0., 1.));
+                        //view = glm::rotate(view, camRot.y, glm::f64vec3(0., 1., 0.));
+                        //view = glm::rotate(view, camRot.x, glm::f64vec3(1., 0., 0.));
+                        //view = glm::eulerAngleXY(camRot.y, camRot.x);
+                        //view = glm::translate(view, camPos);
 
-                    //getc(stdin);
-                    //exit(1);
+                        //glm::f64vec4 origin = view * glm::f64vec4(0, 0, 0, 1);
+                        //glm::f64vec4 direction = view * glm::f64vec4(px, py, -1, 0);
+                        //direction = glm::normalize(direction);
 
-                    h_pos.resize(imageWidth*imageHeight * 3);
-                    h_dir.resize(imageWidth*imageHeight * 3);
 
-                    for (size_t iy = 0; iy < imageHeight; iy++) {
-                        for (size_t ix = 0; ix < imageWidth; ix++) {
+                        //glm::f64vec3 origin{ 0, 0, 0 };
+                        //glm::f64vec3 direction = glm::f64vec3(px, py, -1) - origin;
+                        //direction = glm::normalize(direction);
 
-                            size_t index = ix + iy*imageWidth;
+                        //printf("ori %f %f %f %f\n", origin.x, origin.y, origin.z, origin.w);
+                        //printf("dir %f %f %f %f\n", direction.x, direction.y, direction.z, direction.w);
 
-                            /*
-                            double fx = (ix + 0.5)/imageWidth;
-                            double fy = (iy + 0.5)/imageHeight;
-                            glm::f64vec4 pn = frustum.nearRect.pointOnSurface(fx, fy);
-                            glm::f64vec4 pf = frustum.farRect.pointOnSurface(fx, fy);
-                            
-                            glm::f64vec4 dir = pf - pn;
-                            dir = dir / glm::length(dir);
-                            */
+                        //getc(stdin); exit(1);
 
-                            double px = (2 * (ix + 0.5) / imageWidth - 1) * fovTan * imageAspect;
-                            double py = (1 - 2 * (iy + 0.5) / imageHeight) * fovTan;
-                            glm::f64vec4 dir = glm::normalize(view * glm::f64vec4(px, py, -1, 0));
+                        h_screen.resize(num * 2);
+                        h_pos.resize(imageWidth*imageHeight * 3);
+                        h_dir.resize(imageWidth*imageHeight * 3);
+                        h_vpos.resize(imageWidth*imageHeight * 3);
+                        h_step.resize(imageWidth*imageHeight * 3);
 
-                            h_pos[index + 0 * num] = camPos.x;
-                            h_pos[index + 1 * num] = camPos.y;
-                            h_pos[index + 2 * num] = camPos.z;
-                            h_dir[index + 0 * num] = dir.x;
-                            h_dir[index + 1 * num] = dir.y;
-                            h_dir[index + 2 * num] = dir.z;
+                        for (size_t iy = 0; iy < imageHeight; iy++) {
+                            for (size_t ix = 0; ix < imageWidth; ix++) {
+
+                                size_t index = ix + iy*imageWidth;
+
+                                /*
+                                double fx = (ix + 0.5)/imageWidth;
+                                double fy = (iy + 0.5)/imageHeight;
+                                glm::f64vec4 pn = frustum.nearRect.pointOnSurface(fx, fy);
+                                glm::f64vec4 pf = frustum.farRect.pointOnSurface(fx, fy);
+
+                                glm::f64vec4 dir = pf - pn;
+                                dir = dir / glm::length(dir);
+                                */
+
+                                //fovTan = imageAspect = 1;
+                                double px = (2 * (ix + 0.5) / imageWidth - 1) * fovTan * imageAspect;
+                                double py = (1 - 2 * (iy + 0.5) / imageHeight) * fovTan;
+
+                                glm::f64vec4 o = view * glm::f64vec4(0, 0, 0, 1);
+                                o /= o.w;
+
+                                //if (ix == 0 && iy == 0) {
+                                    //printf("%f %f \n", px, py);
+                                    //getc(stdin);
+                                //}
+
+                                glm::f64vec4 d = glm::f64vec4(px, py, -1, 0);
+                                d = view * d;
+                                d = glm::normalize(d);
+
+                                /*
+                                double len = sqrt(d.x*d.x + d.y*d.y + d.z*d.z);
+                                d.x /= len;
+                                d.y /= len;
+                                d.z /= len;
+                                */
+
+                                //glm::f64vec4 dir = glm::f64vec4(cos(t*0.1)*0.0, cos(t*0.02)*1.2, 0, 0);
+
+                                h_screen[index + 0 * num] = ix;
+                                h_screen[index + 1 * num] = iy;
+                                h_pos[index + 0 * num] = o.x;
+                                h_pos[index + 1 * num] = o.y;
+                                h_pos[index + 2 * num] = o.z;
+                                h_dir[index + 0 * num] = d.x;
+                                h_dir[index + 1 * num] = d.y;
+                                h_dir[index + 2 * num] = d.z;
+                            }
                         }
+
+                        //h_pos[0 + 0 * num] = h_pos[0 + 1 * num] = h_pos[0 + 2 * num] = -10;
+                        //h_pos[1 + 0 * num] = h_pos[1 + 1 * num] = h_pos[1 + 2 * num] = 10;
+
+                        //h_dir[0 + 0 * num] = h_dir[0 + 1 * num] = h_dir[0 + 2 * num] = 0;
+                        //h_dir[1 + 0 * num] = h_dir[1 + 1 * num] = h_dir[1 + 2 * num] = 0;
+
+                        //writeVector(h_dir, debug);
+
+                        b.r.screen = array(num, 2, &h_screen[0]);
+                        b.r.pos = array(num, 3, &h_pos[0]);
+                        b.r.dir = array(num, 3, &h_dir[0]);
+                        b.r.t = constant(0., 3, f64);
+
+                        //printf("%d", h_dir.size());
+
+                        b.initStep();
+                    }
+                    else {
+                        //dtimer("stepOnce");
+
+                        b.v.stepOnce();
+
+                        //stepOnce(vpos, step, tdelta, tmax, side, vid);
+                        //initStep(pos, dir, vpos, step, tdelta, tmax);
                     }
 
-                    h_pos[0 + 0 * num] = h_pos[0 + 1 * num] = h_pos[0 + 2 * num] = -10;
-                    h_pos[1 + 0 * num] = h_pos[1 + 1 * num] = h_pos[1 + 2 * num] = 10;
-                    
-                    h_dir[0 + 0 * num] = h_dir[0 + 1 * num] = h_dir[0 + 2 * num] = -1;
-                    h_dir[1 + 0 * num] = h_dir[1 + 1 * num] = h_dir[1 + 2 * num] = 1;
+                    //gpos = af::min(af::max(vpos, 0.), (double)gmask);
 
-                    pos = array(num, 3, &h_pos[0]);
-                    dir = array(num, 3, &h_dir[0]);
+                    b.v.lookup(grid, ids);
 
-                    //window.image(af::reorder(moddims(dir.as(f32), imageWidth, imageHeight), 1, 0));
-
-                    vid = constant(0, num, 1);
-
-                    initStep(pos, dir, vpos, step, tdelta, tmax);
-
-                } else {
-                    stepOnce(vpos, step, tdelta, tmax, vid);
+                    VoxelTrace hits;
+                    b.v.sortResults(hits);
+                    b.hits += hits;
                 }
 
-                //gpos = af::min(af::max(vpos, 0.), (double)gmask-1);
-                gpos = vpos & gmask;
+                if (stepTimes.size() >= 5) stepTimes.erase(stepTimes.begin());
+                stepTimes.push_back(timer.print());
+                long long avg = 0;
+                for (auto &time : stepTimes) {
+                    avg += time;
+                }
+                avg /= stepTimes.size();
+                printf("avg step: %lld ms\n", avg);
+            }
+
+            //printf("%d", vpos.dims(0));
+
             
-                gindex = array(num, 1);
-                gindex = gpos.col(0) + gpos.col(1)*grid + gpos.col(2)*grid*grid;
-            
-                vid = lookup(ids, gindex, 0);
+
+            //pos.host(&h_pos[0]);
+
+            //af::allocHost()
+/*
+            pos.host(&h_pos[0]);
+            writeVector(h_pos, debug);
+*/
+/*
+            vpos.host(&h_vpos[0]);
+            writeVector(h_vpos, debug);
+*/
+/*
+            step.host(&h_step[0]);
+            writeVector(h_step, debug);
+*/
+
+            //stepNum++;
+
+            //pos += dir;
+
+            {
+                dtimer("step to time");
+                b.stepToTime();
+            }
+
+            {
 
             }
 
+            
+            // Render side as color
+            //array color = vid*((side + 1) / 3.0);
 
+            // Render depth as color
+            //array color = 1 - t*0.01;
+
+            array image;
+            {
+                dtimer("color");
+                if (b.r.t.elements() > 0) {
+                    array colors = (1 - b.r.t*0.01*((b.hits.side + 1) / 3.0))*b.hits.vid;
+                    array screen = af::lookup(b.r.screen, b.hits.indices, 0);
+
+                    h_colors.resize(colors.elements());
+                    h_image.resize(num);
+                    h_screen.resize(screen.elements());
+
+                    colors.host(&h_colors[0]);
+                    screen.host(&h_screen[0]);
+                    af_print(screen);
+                    int num_screen = screen.dims()[0];
+                    for (int i = 0; i < num_screen; i++) {
+                        int x = h_screen[i];
+                        int y = h_screen[i + num_screen];
+                        h_image[x + y*imageWidth] = h_colors[i];
+                    }
+                    image = array(imageWidth, imageHeight, &h_image[0]);
+                }
+                //color = gindex*0.0001;
+            }
+
+            {
+                dtimer("image");
+                if (image.elements() > 0) window.image(image);
+                //if (color.elements() > 0) window.image(af::reorder(moddims(color.as(f32), imageWidth, imageHeight), 1, 0));
+            }
             //window.image(af::reorder(moddims(vid.as(f32), imageWidth, imageHeight), 1, 0));
 
-            window.scatter3(dir.as(f32));
+            //window.scatter3(pos.as(f32));
+            //window.scatter3(dir.as(f32));
+            //window.plot3(dir.as(f32));
             
             window.show();
 
             //stepNum++; if (stepNum > 100) stepNum = 0;
 
             //getc(stdin);
-            Sleep(20);
+            //break;
+
+            //Sleep(16);
 
             //camPos.x = sin(t*0.04) * 10;
 
             //printf("%f \n", camPos.x);
 
-            double a = t*0.1;
-            double r = 5;
+            //double a = t*0.05;
+            //double r = 2;
 
-            //camPos.x = cos(a) * r;
-            //camPos.y = sin(a) * r;
+            //fov = (cos(a) + 1) / 2 * 180;
 
-            //camRot.x += 0.2;
-            //camRot.y += 0.2;
-            //camRot.z += 0.001;
+            //camDir.x = cos(a) * r;
+            //camDir.y = sin(a) * r;
 
-            t++;
+            //printf("%f %f %f \n", camDir.x, camDir.y, camDir.z);
+            
+            //camRot.x = glm::radians(0 + cos(a) * 20);
+            //camRot.y = glm::radians(0.);
+
+            //camRot.x += 0.005;
+            //camRot.y += 0.002;
+            camRot.z += 0.01;
+
+            camPos.z -= 1;
+
+            //break;
+
+            //Sleep(1000);
+            frame++;
 
         }
+
+        fclose(debug);
 
     } catch (af::exception& e) {
         fprintf(stderr, "%s\n", e.what());
