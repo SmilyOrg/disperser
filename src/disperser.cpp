@@ -440,6 +440,7 @@ struct VoxelTrace
         vpos = array();
         tmax = array();
         side = array();
+        vid = array();
         indices = array();
     }
 
@@ -588,7 +589,7 @@ int main()
 
         af::info();
 
-        const int imageWidth = 4;
+        const int imageWidth = 512;
         const int imageHeight = imageWidth;
         const int num = imageWidth*imageHeight;
 
@@ -596,7 +597,7 @@ int main()
         FILE* debug = fopen(debugPath, "wb");
         vassert(debug, "Unable to open %s", debugPath);
         
-        int stepNum = 0;
+        int step = 0;
 
         RayBatch b;
 
@@ -652,7 +653,7 @@ int main()
 
 
 
-        const int gpower = 3;
+        const int gpower = 4;
         const int grid = 1 << gpower;
         const int gmask = grid - 1;
 
@@ -660,6 +661,7 @@ int main()
         h_ids.resize(grid*grid*grid);
 
         std::vector<int> h_screen;
+        std::vector<int> h_indices;
         std::vector<double> h_pos;
         std::vector<double> h_dir;
         std::vector<int> h_vpos;
@@ -725,12 +727,18 @@ int main()
 
             //rewind(debug);
 
+            b.hits.reset();
+
+            const int stepNum = 200;
+            const int stepHopNum = 20;
+
             {
                 Timer timer("stepping");
 
-                for (stepNum = 0; stepNum < 500; stepNum++) {
+                //for (step = 0; step < 100; step++) {
+                for (int stepHop = 0; stepHop < stepHopNum; stepHop++, step++) {
 
-                    if (stepNum == 0) {
+                    if (step == 0) {
 
                         //dtimer("initStep");
 
@@ -759,7 +767,7 @@ int main()
 
                         glm::f64mat4 view{};
                         view = glm::toMat4(qrot);
-                        //view = glm::translate(view, camPos);
+                        view = glm::translate(view, camPos);
 
 
                         /*
@@ -889,6 +897,7 @@ int main()
                     VoxelTrace hits;
                     b.v.sortResults(hits);
                     b.hits += hits;
+                    //printf("%d   %d hits\n", step, b.hits.vid.elements());
                 }
 
                 if (stepTimes.size() >= 5) stepTimes.erase(stepTimes.begin());
@@ -921,8 +930,7 @@ int main()
             writeVector(h_step, debug);
 */
 
-            //stepNum++;
-
+            
             //pos += dir;
 
             {
@@ -939,30 +947,47 @@ int main()
             //array color = vid*((side + 1) / 3.0);
 
             // Render depth as color
-            //array color = 1 - t*0.01;
+            //array color = 1 - b.r.t*0.01;
 
             array image;
             {
                 dtimer("color");
+
+                h_image.resize(num);
+                if (step == stepHopNum) {
+                //if ((step/stepHopNum)%3 == 0) {
+                    // Reset image
+                    memset(&h_image[0], 0, num * sizeof(h_image[0]));
+                }
+
                 if (b.r.t.elements() > 0) {
-                    array colors = (1 - b.r.t*0.01*((b.hits.side + 1) / 3.0))*b.hits.vid;
+                    array colors = (1 - b.r.t*0.005*((b.hits.side + 1) / 3.0))*b.hits.vid;
                     array screen = af::lookup(b.r.screen, b.hits.indices, 0);
 
                     h_colors.resize(colors.elements());
-                    h_image.resize(num);
                     h_screen.resize(screen.elements());
+                    //h_indices.resize(b.hits.indices.elements());
 
-                    colors.host(&h_colors[0]);
-                    screen.host(&h_screen[0]);
-                    af_print(screen);
+                    colors.as(f32).host(&h_colors[0]);
+                    screen.as(s32).host(&h_screen[0]);
+                    //b.hits.indices.as(s32).host(&h_indices[0]);
+
+                    //af_print(screen);
                     int num_screen = screen.dims()[0];
                     for (int i = 0; i < num_screen; i++) {
                         int x = h_screen[i];
                         int y = h_screen[i + num_screen];
+                        //h_image[x + y*imageWidth] = (float)h_indices[x + y*imageWidth] / (imageWidth*imageHeight);
+                        //h_image[x + y*imageWidth] = 1 - (float)(step + (float)i / num_screen) / 150;
+                        //h_image[x + y*imageWidth] = 1 - (float)(step + (float)i / num_screen) / 150 - h_colors[i];
                         h_image[x + y*imageWidth] = h_colors[i];
                     }
-                    image = array(imageWidth, imageHeight, &h_image[0]);
+                    //image = array(imageWidth, imageHeight, &h_colors[0]);
+                    //image = af::reorder(moddims(colors.as(f32), imageWidth, imageHeight), 1, 0);
                 }
+
+                image = array(imageWidth, imageHeight, &h_image[0]);
+
                 //color = gindex*0.0001;
             }
 
@@ -979,7 +1004,14 @@ int main()
             
             window.show();
 
-            //stepNum++; if (stepNum > 100) stepNum = 0;
+            step++; if (step > stepNum) step = 0;
+            
+            if (step == 0) {
+                frame++;
+                camPos.z -= 2;
+                camRot.x += 0.04;
+                camRot.z += 0.05;
+            }
 
             //getc(stdin);
             //break;
@@ -1005,14 +1037,13 @@ int main()
 
             //camRot.x += 0.005;
             //camRot.y += 0.002;
-            camRot.z += 0.01;
+            //camRot.z += 0.01;
 
-            camPos.z -= 1;
+            //camPos.z -= 1;
 
             //break;
 
             //Sleep(1000);
-            frame++;
 
         }
 
@@ -1028,5 +1059,5 @@ int main()
 
     //pos = join(1, pos, pos);
 
-	return 0;
+    return 0;
 }
