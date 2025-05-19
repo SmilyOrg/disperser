@@ -80,7 +80,7 @@ public:
             c /= 1000000l;
             unit = "ms";
         }
-        printf("%s %*s%lld%s\n", name, (int)(20 - strlen(name)), " ", c, unit);
+        printf("\n%s %*s%lld%s ", name, (int)(20 - strlen(name)), " ", c, unit);
         return c;
     }
 };
@@ -408,7 +408,7 @@ struct VoxelTrace
 
     array getOrJoin(const array lhs, const array rhs) const
     {
-        return lhs.elements() > 0 ? rhs.elements() > 0 ? af::join(0, lhs, rhs) : lhs : rhs;
+        return lhs.elements() == 0 ? rhs : rhs.elements() == 0 ? lhs : af::join(0, lhs, rhs);
     }
 
     VoxelTrace& operator+=(const VoxelTrace &rhs)
@@ -510,8 +510,11 @@ struct VoxelTrace
         array sorted_vid;
         array sorted_vid_index;
 
-        af::sort(sorted_vid, sorted_vid_index, vid, 0, true);
-
+        {
+            dtimer("afsort");
+            af::sort(sorted_vid, sorted_vid_index, vid, 0, true);
+        }
+        
         sorted_vid_index = sorted_vid_index.copy();
 
         int nonzero = af::count<int>(sorted_vid);
@@ -582,6 +585,80 @@ struct RayBatch
     }
 };
 
+struct OctPool {
+    static const int octPower = 3;
+    static const int octSize  = 8;
+
+    int power;
+    int size;
+    std::vector<char> pool;
+
+    OctPool(int power) : power(power) {
+        size = 1 << power;
+        pool.resize(octSize, 0);
+    }
+
+    char& getChildPointer(char* tile, const char tx, const char ty, const char tz) {
+        return tile[tx + ty*size + tz*size*size];
+    }
+
+    char* getChildTile(char* tile, const char tx, const char ty, const char tz) {
+        char pointer = getChildPointer(tile, tx, ty, tz);
+        return pointer == 0 ? nullptr : &pool[pointer << octPower];
+    }
+
+    char* ensureChild(char* tile, const char tx, const char ty, const char tz) {
+        char &pointer = getChildPointer(tile, tx, ty, tz);
+        char* child;
+        if (pointer == 0) {
+            pointer = pool.size() >> octPower;
+            size_t oldSize = pool.size();
+            pool.resize(oldSize + octSize, 0);
+            child = &pool[oldSize];
+        } else {
+            child = &pool[pointer << octPower];
+        }
+        return child;
+    }
+
+    void insert(int x, int y, int z) {
+        char* tile = &pool[0];
+        for (int cpower = power-1; cpower >= 0; cpower--) {
+            int tx = (x >> cpower) & 1;
+            int ty = (y >> cpower) & 1;
+            int tz = (z >> cpower) & 1;
+            tile = ensureChild(tile, tx, ty, tz);
+            int dummy = size;
+        }
+    }
+
+    bool occupied(int x, int y, int z) {
+        char* tile = &pool[0];
+        int cpower;
+        for (cpower = power - 1; tile != nullptr, cpower >= 0; cpower--) {
+            char tx = (x >> cpower) & 1;
+            char ty = (y >> cpower) & 1;
+            char tz = (z >> cpower) & 1;
+            tile = getChildTile(tile, tx, ty, tz);
+        }
+        return tile != nullptr;
+    }
+
+    void debugPrint(const std::vector<int> &h_ids) {
+        for (size_t iz = 0; iz < size; iz++) {
+            for (size_t iy = 0; iy < size; iy++) {
+                for (size_t ix = 0; ix < size; ix++) {
+                    int id = h_ids[getBlockIndexXYZ(ix, iy, iz, size)];
+                    printf("%d%d", id, occupied(ix, iy, iz) ? 1 : 0);
+                }
+                printf("\n");
+            }
+            printf("\n\n");
+        }
+    }
+
+};
+
 int main()
 {
     try {
@@ -589,8 +666,8 @@ int main()
 
         af::info();
 
-        const int imageWidth = 512;
-        const int imageHeight = imageWidth;
+        const int imageWidth = 1280/2;
+        const int imageHeight = 720/2;
         const int num = imageWidth*imageHeight;
 
         const char* debugPath = "points.bin";
@@ -653,7 +730,7 @@ int main()
 
 
 
-        const int gpower = 4;
+        const int gpower = 2;
         const int grid = 1 << gpower;
         const int gmask = grid - 1;
 
@@ -671,7 +748,8 @@ int main()
         std::vector<float> h_colors;
 
         const float center = grid * 0.5;
-        const float radius = grid/3 - 1;
+        //const float radius = grid / 3 - 1;
+        const float radius = grid / 2;
         for (size_t iz = 0; iz < grid; iz++) {
             for (size_t iy = 0; iy < grid; iy++) {
                 for (size_t ix = 0; ix < grid; ix++) {
@@ -690,6 +768,23 @@ int main()
                 }
             }
         }
+
+        OctPool pool(gpower);
+        //pool.insert(2, 1, 0);
+
+        for (size_t iz = 0; iz < grid; iz++) {
+            for (size_t iy = 0; iy < grid; iy++) {
+                for (size_t ix = 0; ix < grid; ix++) {
+                    if (h_ids[getBlockIndexXYZ(ix, iy, iz, grid)] == 1) {
+                        printf("%d %d %d\n", ix, iy, iz);
+                        pool.insert(ix, iy, iz);
+                    }
+                }
+            }
+        }
+
+        pool.debugPrint(h_ids);
+
 
         array ids(grid*grid*grid, &h_ids[0]);
         //array ids(grid, grid, grid, &h_ids[0]);
@@ -719,28 +814,30 @@ int main()
 
         //double t = 0;
 
-        af::Window window(512, 512, "disperser");
+        af::Window window(imageWidth, imageHeight, "disperser");
         while (!window.close()) {
         //while (frame < 25) {
+
+            printf("\n\n\n");
 
             printf("frame %d\n", frame);
 
             //rewind(debug);
 
-            b.hits.reset();
-
-            const int stepNum = 200;
-            const int stepHopNum = 20;
+            const int stepNum = 300;
+            const int stepHopNum = stepNum;
 
             {
                 Timer timer("stepping");
+
+                uint32_t raysTouched = 0;
 
                 //for (step = 0; step < 100; step++) {
                 for (int stepHop = 0; stepHop < stepHopNum; stepHop++, step++) {
 
                     if (step == 0) {
 
-                        //dtimer("initStep");
+                        dtimer("stepinit");
 
                         //glm::f64mat4 projection = glm::ortho(0.0, (double)imageWidth, (double)imageHeight, 0.0, 0.1, 1000.0);
                         //glm::f64mat4 projection = glm::orthoLH(0.0, (double)imageWidth, (double)imageHeight, 0.0, 0.1, 1000.0);
@@ -766,9 +863,9 @@ int main()
                         glm::quat qrot = glm::quat(camRot);
 
                         glm::f64mat4 view{};
-                        view = glm::toMat4(qrot);
                         view = glm::translate(view, camPos);
-
+                        view *= glm::toMat4<glm::f64, glm::highp>(qrot);
+                        //view = view*glm::toMat4(qrot);
 
                         /*
                         printf("0: %f %f %f \n", view[0][0], view[1][0], view[2][0]);
@@ -880,12 +977,16 @@ int main()
                         //printf("%d", h_dir.size());
 
                         b.initStep();
+                        raysTouched += b.v.indices.elements();
+
+                        b.hits.reset();
                     }
                     else {
-                        //dtimer("stepOnce");
+                        //dtimer("steponce");
 
+                        raysTouched += b.v.indices.elements();
                         b.v.stepOnce();
-
+                        
                         //stepOnce(vpos, step, tdelta, tmax, side, vid);
                         //initStep(pos, dir, vpos, step, tdelta, tmax);
                     }
@@ -894,11 +995,27 @@ int main()
 
                     b.v.lookup(grid, ids);
 
+                    /*
                     VoxelTrace hits;
-                    b.v.sortResults(hits);
-                    b.hits += hits;
+                    {
+                        dtimer("sort");
+                        b.v.sortResults(hits);
+                    }
+                    {
+                        dtimer("join");
+                        b.hits += hits;
+                    }
+                    */
+                    b.hits = b.v;
+
                     //printf("%d   %d hits\n", step, b.hits.vid.elements());
                 }
+
+                printf("\nrays: %6dk active %6dk done %6dk total",
+                    b.v.indices.elements()/1000,
+                    b.hits.indices.elements()/1000,
+                    (b.v.indices.elements() + b.hits.indices.elements())/1000
+                );
 
                 if (stepTimes.size() >= 5) stepTimes.erase(stepTimes.begin());
                 stepTimes.push_back(timer.print());
@@ -907,7 +1024,7 @@ int main()
                     avg += time;
                 }
                 avg /= stepTimes.size();
-                printf("avg step: %lld ms\n", avg);
+                printf(" %lldms/step avg %6dk rays %6lldk rps", avg, raysTouched/1000, raysTouched*1000L/stepTimes.back()/1000L);
             }
 
             //printf("%d", vpos.dims(0));
@@ -951,7 +1068,7 @@ int main()
 
             array image;
             {
-                dtimer("color");
+                dtimer("image");
 
                 h_image.resize(num);
                 if (step == stepHopNum) {
@@ -980,19 +1097,19 @@ int main()
                         //h_image[x + y*imageWidth] = (float)h_indices[x + y*imageWidth] / (imageWidth*imageHeight);
                         //h_image[x + y*imageWidth] = 1 - (float)(step + (float)i / num_screen) / 150;
                         //h_image[x + y*imageWidth] = 1 - (float)(step + (float)i / num_screen) / 150 - h_colors[i];
-                        h_image[x + y*imageWidth] = h_colors[i];
+                        h_image[y + x*imageHeight] = h_colors[i];
                     }
                     //image = array(imageWidth, imageHeight, &h_colors[0]);
                     //image = af::reorder(moddims(colors.as(f32), imageWidth, imageHeight), 1, 0);
                 }
 
-                image = array(imageWidth, imageHeight, &h_image[0]);
+                image = array(imageHeight, imageWidth, &h_image[0]);
 
                 //color = gindex*0.0001;
             }
 
             {
-                dtimer("image");
+                dtimer("display");
                 if (image.elements() > 0) window.image(image);
                 //if (color.elements() > 0) window.image(af::reorder(moddims(color.as(f32), imageWidth, imageHeight), 1, 0));
             }
